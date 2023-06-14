@@ -8,6 +8,7 @@ import hashlib
 import inspect
 import binascii
 import unittest
+import textwrap
 import numpy as np
 #import jeanny3 as j # DEFAULT STORAGE FOR HASHED OBJECTS
 from .conf import collections as j
@@ -650,15 +651,17 @@ class Container(ABC):
         
     def __repr__(self):
         return self.__hashval__
-         
+
 class Container_function(Container):
     
     __contained_class__ = (lambda:None).__class__
 
     def pack(self,obj):
+        src = inspect.getsource(obj)
+        #src = dill.source.getsource(obj)
+        src_ = textwrap.dedent(src)
         funcdict = {
-            'source': inspect.getsource(obj),
-            #'source': dill.source.getsource(obj),
+            'source': src_,
             'name': obj.__name__
         }
         buffer = dump_to_string(funcdict,sort_keys=True)
