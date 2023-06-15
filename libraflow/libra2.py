@@ -1,6 +1,9 @@
 import os
 import io
+import re
+import sys
 import json
+import types
 #import ctypes
 #import pickle # should be used only with elementary types!!!
 #import dill # uses pickle; can serialize types
@@ -9,8 +12,12 @@ import inspect
 import binascii
 import unittest
 import textwrap
+import importlib
+
 import numpy as np
+
 #import jeanny3 as j # DEFAULT STORAGE FOR HASHED OBJECTS
+
 from .conf import collections as j
 from abc import abstractmethod, ABC
 
@@ -652,7 +659,215 @@ class Container(ABC):
     def __repr__(self):
         return self.__hashval__
 
+class Decorator:
+    """ Parser for decorators  """
+    def __init__(self,decor_string):
+        regex = '@([a-zA-Z][a-zA-Z0-9]*)(\(.+\))*'
+        # get name and argstring
+        name,argstring = re.search(regex,decor_string).groups()
+        self.name = name
+        # get args and kwargs
+        args = []
+        kwargs = {}
+        if argstring is not None:
+            argstring = re.search('\((.+)\)',argstring).group(1)
+            argbufs = argstring.split(',')
+            for argbuf in argbufs:
+                argbuf = argbuf.strip()
+                vv = [v.strip() for v in argbuf.split()]
+                if len(vv)==1:
+                    val = eval(vv[0])
+                    args.append(val)
+                elif len(vv)==2:
+                    val = eval(vv[1])
+                    kwargs[vv[0]] = val
+                else:
+                    raise Exception('parse error')
+        self.args = args
+        self.kwargs = kwargs
+
+def strip_decorators(source):
+    index = source.find("def ")
+    decors = [
+        line.strip().split()[0]
+        for line in source[:index].strip().splitlines()
+        if line.strip()[0] == "@"
+    ]
+    body = source[index:]
+    decorators = []
+    for decor_string in decors:
+        decorators.append(Decorator(decor_string))
+    return decorators,body
+
+def create_module(name,code=''):
+    module = types.ModuleType(name)
+    exec(code, module.__dict__)
+    return module
+
+def import_module_by_path(module_name,module_path):
+    # https://www.geeksforgeeks.org/how-to-import-a-python-module-given-the-full-path/
+    # https://stackoverflow.com/questions/67631/how-do-i-import-a-module-given-the-full-path
+    #print(module_name,module_path)
+    #print(os.path.isfile(os.path.join(module_path,module_name)))
+    #import importlib.util
+    spec=importlib.util.spec_from_file_location(module_name,module_path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[module_name] = module # dill/pickle doesn't work without this line
+    spec.loader.exec_module(module)
+    # ALTERNATIVE:
+    #import importlib.machinery, importlib.util
+    #loader = importlib.machinery.SourceFileLoader(module_name, file_path)
+    #spec = importlib.util.spec_from_file_location(module_name, loader=loader)
+    #module = importlib.util.module_from_spec(spec)
+    #spec.loader.exec_module(module)
+    return module
+
+class EncapsulatedFunction:
+    """
+    Class for converting normal Python functions
+    to the "encapsulated" ones to try and avoid hidden side-effects.
+    """
+
+    def __init__(self,func=None):
+    
+        if func is not None:
+            
+            src = inspect.getsource(func)
+            src_ = textwrap.dedent(src)
+            
+            msg = 'currenlty only one decorator '+\
+                'is allowed: libraflow.track'
+            
+            decorators,body = strip_decorators(src_)
+            if len(decorators)==0:
+                pass
+            elif len(decorators)==1:
+                decorator = decorators[0]
+                decor_value = eval(decorator.name)
+                if decor_value is not track:
+                    raise Exception(msg)
+            elif len(decorators)>1:
+                raise Exception(msg)
+
+            _tracking = getattr(func,'_tracking',
+                {'tracking_args':[],'tracking_kwargs':{}})
+            self.tracked = '_tracking' in func.__dict__              
+            self.tracking_args = _tracking['tracking_args']
+            self.tracking_kwargs = _tracking['tracking_kwargs']
+
+            module_name = self.generate_module_name()
+            self.__module_name__ = module_name
+            self.__module__ = create_module(module_name,body)
+            self.__name__ = func.__name__
+            self.__body__ = body
+            self.__func__ = self.apply_decorator()
+        else:
+            self.tracked = None
+            self.tracking_args = []
+            self.tracking_kwargs = {}
+            self.__module_name__ = None
+            self.__module__ = None
+            self.__name__ = None
+            self.__body__ = None
+            self.__func__ = None
+                     
+    """ # OBSOLETE
+    @classmethod
+    def load(cls,buffer):
+        funcdict = load_from_string(buffer)
+        body = funcdict['source']
+        name = funcdict['name']
+        obj = cls()
+        obj.tracked = funcdict['tracked']
+        obj.tracking_args = funcdict.get('tracking_args',[])
+        obj.tracking_kwargs = funcdict.get('tracking_kwargs',[])
+        module_name = obj.generate_module_name()
+        obj.__module_name__ = module_name
+        obj.__module__ = create_module(module_name,body)
+        obj.__name__ = name
+        obj.__body__ = body
+        obj.__func__ = obj.apply_decorator()
+        return obj
+    """
+        
+    @classmethod
+    def load_from_hash(cls,hashval,buffer):
+        # get pathes for module
+        subdir = hashval[:2]
+        remainder = hashval[2:]
+        module_path = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        module_name = 'mod_'+remainder
+        # fill the object's fields
+        funcdict = load_from_string(buffer)
+        body = funcdict['source']
+        name = funcdict['name']
+        obj = cls()
+        obj.tracked = funcdict['tracked']
+        obj.tracking_args = funcdict.get('tracking_args',[])
+        obj.tracking_kwargs = funcdict.get('tracking_kwargs',[])
+        obj.__module_name__ = module_name
+        obj.__name__ = name
+        obj.__body__ = body
+        # create module if not existing        
+        filepath = os.path.join(module_path,module_name)+'.py'
+        if not os.path.exists(filepath):
+            with open(filepath,'w') as f:
+                f.write(body)
+        # load module and apply decorator
+        obj.__module__ = import_module_by_path(module_name,filepath)
+        obj.__func__ = obj.apply_decorator()
+        return obj
+
+    def dump(self):
+        funcdict = {
+            'source': self.__body__,
+            'name': self.__name__,
+            'tracked': self.tracked,
+        }
+        if self.tracked:
+            funcdict['tracking_args'] = self.tracking_args
+            funcdict['tracking_kwargs'] = self.tracking_kwargs
+        buffer = dump_to_string(funcdict,sort_keys=True)
+        return buffer
+        
+    def generate_module_name(self):
+        return 'tmpmodule'
+        
+    def apply_decorator(self):
+        funcname = self.__name__
+        module = self.__module__
+        function = getattr(module,funcname)
+        if self.tracked:
+            args = self.tracking_args
+            kwargs = self.tracking_kwargs
+            function = track(*args,**kwargs)(function)
+        return function
+        
+    def __call__(self,*args,**kwargs):
+        return self.__func__()        
+
 class Container_function(Container):
+    
+    __contained_class__ = (lambda:None).__class__
+
+    def pack(self,obj):
+        encfunc = EncapsulatedFunction(obj)
+        buffer = encfunc.dump()
+        hashval = calc_hash_str(buffer)
+        return buffer, hashval
+    
+    def unpack(self):
+        hashval = self.__hashval__
+        buffer = self.__buffer__
+        #encfunc = EncapsulatedFunction.load(self.__buffer__)
+        encfunc = EncapsulatedFunction.load_from_hash(hashval,buffer)
+        return encfunc.__func__
+        
+    def pretty_print(self):
+        dct = json.loads(self.__buffer__)
+        return 'function(%s)'%dct['name']
+
+class Container_function_BAK(Container):
     
     __contained_class__ = (lambda:None).__class__
 
@@ -827,7 +1042,7 @@ class Workflow(Referee):
             argnames = argspec.args
         else:
             argnames = []
-                        
+                                        
         if func:                        
             # calculate and containerize outputs
             outs = func.object(
@@ -1155,9 +1370,17 @@ class Container_Tree(Container):
 Container.register(Container_Tree)
 
 # provenance decorator
-def track(nout,autosave=False,cache=True):
+#def track(nout,autosave=False,cache=True):
+def track(*tracking_args,**tracking_kwargs):
+    nout = tracking_args[0]
+    autosave = tracking_kwargs.get('autosave',False)
+    cache = tracking_kwargs.get('cache',True)
     def inner(foo):
         def wrapper(*args,**kwargs):
+            foo._tracking = {
+                'tracking_args':tracking_args,
+                'tracking_kwargs':tracking_kwargs
+            }
             w = Workflow(foo,args=args,kwargs=kwargs,nout=nout)
             cw = Container.create(w)
             #graph_backend.__cache__[id(w)] = w # save workflow in cache
