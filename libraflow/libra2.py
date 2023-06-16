@@ -668,19 +668,17 @@ class Decorator:
         self.name = name
         # get args and kwargs
         args = []
-        kwargs = {}
+        kwargs = []
         if argstring is not None:
             argstring = re.search('\((.+)\)',argstring).group(1)
             argbufs = argstring.split(',')
             for argbuf in argbufs:
                 argbuf = argbuf.strip()
-                vv = [v.strip() for v in argbuf.split()]
+                vv = [v.strip() for v in argbuf.split('=')]
                 if len(vv)==1:
-                    val = eval(vv[0])
-                    args.append(val)
+                    args.append(argbuf)
                 elif len(vv)==2:
-                    val = eval(vv[1])
-                    kwargs[vv[0]] = val
+                    kwargs.append(argbuf)
                 else:
                     raise Exception('parse error')
         self.args = args
@@ -1372,7 +1370,9 @@ Container.register(Container_Tree)
 # provenance decorator
 #def track(nout,autosave=False,cache=True):
 def track(*tracking_args,**tracking_kwargs):
-    nout = tracking_args[0]
+    nout = tracking_kwargs.get('nout')
+    if nout is None:
+        nout = tracking_args[0]
     autosave = tracking_kwargs.get('autosave',False)
     cache = tracking_kwargs.get('cache',True)
     def inner(foo):
