@@ -1,12 +1,12 @@
 from setuptools import find_packages, setup
 
 setup(
-    name="libraflow",
+    name="hashtrace",
     version="0.1",
     author="Roman Kochanov",
     author_email="",
     description="Simple and transparent engine for research workflow management",
-    url="https://github.com/romankochanov/libraflow",
+    url="https://github.com/romankochanov/hashtrace",
     python_requires=">=3.5",
     packages=find_packages(),
     classifiers=[

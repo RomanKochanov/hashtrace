@@ -9,7 +9,7 @@
 
 build/
 dist/
-libraflow.egg-info/
+hashtrace.egg-info/
 
 showcase/*
 !showcase/*.py
