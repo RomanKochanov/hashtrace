@@ -29,6 +29,9 @@ import sqlite3
 import zlib
 archlib = zlib
 
+DEBUG = False
+DEBUG_SUBGRAPH = False
+
 ENCODING = 'utf-8'
 REPOSITORY_DIR = '.provenance'
 
@@ -544,8 +547,8 @@ graph_backend = ContainerGraph()
 
 # recursive version of save_graph
 def __save_subgraph_rec__(container):
- 
-    DEBUG = False
+    
+    if DEBUG: print('__save_subgraph_rec__>>>')
  
     # get contained object
     obj = container.object
@@ -555,28 +558,29 @@ def __save_subgraph_rec__(container):
     
     # save parent containers
     parents = graph_backend.get_parent_containers(id(obj))
-    if DEBUG: print('Get',container,'parents: ',parents)
+    if DEBUG_SUBGRAPH: print('Get',container,'parents: ',parents)
     for c in parents:
         lookup = Container.search(c.__hashval__)
         if not lookup:
-            if DEBUG: print('Recurse into',container,'parent: ',c)
+            if DEBUG_SUBGRAPH: print('Recurse into',container,'parent: ',c)
             __save_subgraph_rec__(c)
         else:
-            if DEBUG: print('Succesfully found',c,'(recursion break)')
+            if DEBUG_SUBGRAPH: print('Succesfully found',c,'(recursion break)')
     
     # save child containers
     children = graph_backend.get_child_containers(id(obj))
-    if DEBUG: print('Get',container,'children: ',children)
+    if DEBUG_SUBGRAPH: print('Get',container,'children: ',children)
     for c in children:
         lookup = Container.search(c.__hashval__)
         if not lookup:
-            if DEBUG: print('Recurse into',container,'child: ',c)
+            if DEBUG_SUBGRAPH: print('Recurse into',container,'child: ',c)
             __save_subgraph_rec__(c)
         else:
-            if DEBUG: print('Succesfully found',c,'(recursion break)')
+            if DEBUG_SUBGRAPH: print('Succesfully found',c,'(recursion break)')
     
 def save_graph(*objs):
     """ Main saving function for objects/containers """
+    if DEBUG: print('save_graph>>>')
     for obj in objs:
         container = graph_backend.get_containers_by_object_ids(id(obj))[0]
         __save_subgraph_rec__(container)
@@ -586,13 +590,13 @@ class Container(ABC):
     __registry__ = {}
     
     def __init__(self,obj=None):
+        if DEBUG: print('Container.__init__>>>')
         if obj is None:
             return # allow empty init
         assert self.__contained_class__ is obj.__class__
         self.__classname__ = type(obj).__name__
-        self.__buffer__, self.__hashval__ \
-            = self.pack(obj)
         self.__object__ = obj # temporary link to the unpacked object
+        self.__buffer__, self.__hashval__ = self.pack(obj)
         #print('add node: ',self)
         graph_backend.add_node(self) # add object to transient graph
         
@@ -609,6 +613,7 @@ class Container(ABC):
         
     @classmethod
     def create(cls,obj):
+        if DEBUG: print('Container.create>>>')
         obj_type = type(obj)
         if issubclass(obj_type,cls): # return unchanged, if container
             return obj 
@@ -643,7 +648,10 @@ class Container(ABC):
         
     @property
     def object(self):
+        if DEBUG: print('Container.object>>>',
+            self,self.__classname__,self.__dict__.get('__object__').__class__.__name__)
         if '__object__' not in self.__dict__:
+            if DEBUG: print("'__object__' not in self.__dict__")
             self.__object__ = self.unpack()
         return self.__object__
         
@@ -662,6 +670,7 @@ class Container(ABC):
 class Decorator:
     """ Parser for decorators  """
     def __init__(self,decor_string):
+        if DEBUG: print('Decorator.__init__>>>')
         regex = '@([a-zA-Z][a-zA-Z0-9]*)(\(.+\))*'
         # get name and argstring
         name,argstring = re.search(regex,decor_string).groups()
@@ -685,6 +694,7 @@ class Decorator:
         self.kwargs = kwargs
 
 def strip_decorators(source):
+    if DEBUG: print('strip_decorators>>>')
     index = source.find("def ")
     decors = [
         line.strip().split()[0]
@@ -698,11 +708,13 @@ def strip_decorators(source):
     return decorators,body
 
 def create_module(name,code=''):
+    if DEBUG: print('create_module>>>')
     module = types.ModuleType(name)
     exec(code, module.__dict__)
     return module
 
 def import_module_by_path(module_name,module_path):
+    if DEBUG: print('import_module_by_path>>>')
     # https://www.geeksforgeeks.org/how-to-import-a-python-module-given-the-full-path/
     # https://stackoverflow.com/questions/67631/how-do-i-import-a-module-given-the-full-path
     #print(module_name,module_path)
@@ -727,6 +739,8 @@ class EncapsulatedFunction:
     """
 
     def __init__(self,func=None):
+        
+        if DEBUG: print('EncapsulatedFunction.__init__>>>')
     
         if func is not None:
             
@@ -788,8 +802,13 @@ class EncapsulatedFunction:
         return obj
     """
         
+    #@classmethod
+    #def load_to_module(cls,hashval,buffer):
+    #    pass
+        
     @classmethod
-    def load_from_hash(cls,hashval,buffer):
+    def load_from_hash(cls,hashval,buffer,apply_decorator=True):
+        if DEBUG: print('EncapsulatedFunction.load_from_hash>>>')
         # get pathes for module
         subdir = hashval[:2]
         remainder = hashval[2:]
@@ -806,7 +825,47 @@ class EncapsulatedFunction:
         obj.__module_name__ = module_name
         obj.__name__ = name
         obj.__body__ = body
-        # create module if not existing        
+        # create module path if not existing                    
+        if not os.path.exists(module_path):
+            os.makedirs(module_path)
+        # create module if not existing                    
+        filepath = os.path.join(module_path,module_name)+'.py'
+        if not os.path.exists(filepath):
+            with open(filepath,'w') as f:
+                f.write(body)
+        # load module and apply decorator
+        obj.__module__ = import_module_by_path(module_name,filepath)
+        if apply_decorator:
+            func = obj.apply_decorator()
+        else:
+            func = getattr(obj.__module__,name)
+        obj.__func__ = func
+        return obj
+
+    """
+    @classmethod
+    def load_from_hash(cls,hashval,buffer):
+        pif DEBUG: print('EncapsulatedFunction.load_from_hash>>>')
+        # get pathes for module
+        subdir = hashval[:2]
+        remainder = hashval[2:]
+        module_path = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        module_name = 'mod_'+remainder
+        # fill the object's fields
+        funcdict = load_from_string(buffer)
+        body = funcdict['source']
+        name = funcdict['name']
+        obj = cls()
+        obj.tracked = funcdict['tracked']
+        obj.tracking_args = funcdict.get('tracking_args',[])
+        obj.tracking_kwargs = funcdict.get('tracking_kwargs',[])
+        obj.__module_name__ = module_name
+        obj.__name__ = name
+        obj.__body__ = body
+        # create module path if not existing                    
+        if not os.path.exists(module_path):
+            os.makedirs(module_path)
+        # create module if not existing                    
         filepath = os.path.join(module_path,module_name)+'.py'
         if not os.path.exists(filepath):
             with open(filepath,'w') as f:
@@ -815,8 +874,10 @@ class EncapsulatedFunction:
         obj.__module__ = import_module_by_path(module_name,filepath)
         obj.__func__ = obj.apply_decorator()
         return obj
+    """
 
     def dump(self):
+        if DEBUG: print('EncapsulatedFunction.dump>>>')
         funcdict = {
             'source': self.__body__,
             'name': self.__name__,
@@ -832,6 +893,7 @@ class EncapsulatedFunction:
         return 'tmpmodule'
         
     def apply_decorator(self):
+        if DEBUG: print('EncapsulatedFunction.apply_decorator>>>')
         funcname = self.__name__
         module = self.__module__
         function = getattr(module,funcname)
@@ -842,19 +904,49 @@ class EncapsulatedFunction:
         return function
         
     def __call__(self,*args,**kwargs):
-        return self.__func__()        
+        if DEBUG: print('EncapsulatedFunction.__call__>>>')
+        return self.__func__(*args,**kwargs)        
 
-class Container_function(Container):
+class Container_function_BAK3(Container):
+#class Container_function(Container):
     
     __contained_class__ = (lambda:None).__class__
 
     def pack(self,obj):
+        if DEBUG: print('Container_function.pack>>>')
         encfunc = EncapsulatedFunction(obj)
         buffer = encfunc.dump()
         hashval = calc_hash_str(buffer)
         return buffer, hashval
     
     def unpack(self):
+        if DEBUG: print('Container_function.unpack>>>')
+        hashval = self.__hashval__
+        buffer = self.__buffer__
+        #encfunc = EncapsulatedFunction.load(self.__buffer__)
+        encfunc = EncapsulatedFunction.load_from_hash(hashval,buffer)
+        return encfunc.__func__
+        
+    def pretty_print(self):
+        dct = json.loads(self.__buffer__)
+        return 'function(%s)'%dct['name']
+
+#class Container_function_BAK2(Container):
+class Container_function(Container):
+    
+    __contained_class__ = (lambda:None).__class__
+
+    def pack(self,obj):
+        if DEBUG: print('Container_function.pack>>>')
+        encfunc = EncapsulatedFunction(obj)
+        buffer = encfunc.dump()
+        hashval = calc_hash_str(buffer)
+        self.__object__ = EncapsulatedFunction.load_from_hash(
+            hashval,buffer,apply_decorator=False) # strip off all context
+        return buffer, hashval
+    
+    def unpack(self):
+        if DEBUG: print('Container_function.unpack>>>')
         hashval = self.__hashval__
         buffer = self.__buffer__
         #encfunc = EncapsulatedFunction.load(self.__buffer__)
@@ -1028,6 +1120,8 @@ class Workflow(Referee):
         cache - caching flag
         """        
         
+        if DEBUG: print('Workflow.__init__>>>')
+        
         # Convert input arguments to containers
         func = Container.create(func) if func else None
         args = [Container.create(arg) for arg in args]
@@ -1097,6 +1191,7 @@ class Container_Workflow(Container):
     __contained_class__ = Workflow
     
     def pack(self,obj):
+        if DEBUG: print('Container_Workflow.pack>>>')
         refs = obj.references
         dct = {'refs':Referee.refs_to_dict(refs)}
         buffer = dump_to_string(dct)
@@ -1104,6 +1199,7 @@ class Container_Workflow(Container):
         return buffer, hashval
     
     def unpack(self):
+        if DEBUG: print('Container_Workflow.unpack>>>')
         dct = load_from_string(self.__buffer__)
         w = Workflow()
         w.__references__ = Referee.refs_from_dict(dct['refs'])
@@ -1370,13 +1466,16 @@ Container.register(Container_Tree)
 # provenance decorator
 #def track(nout,autosave=False,cache=True):
 def track(*tracking_args,**tracking_kwargs):
+    if DEBUG: print('track>>>')
     nout = tracking_kwargs.get('nout')
     if nout is None:
         nout = tracking_args[0]
     autosave = tracking_kwargs.get('autosave',False)
     cache = tracking_kwargs.get('cache',True)
     def inner(foo):
+        if DEBUG: print('inner>>>')
         def wrapper(*args,**kwargs):
+            if DEBUG: print('wrapper>>>')
             foo._tracking = {
                 'tracking_args':tracking_args,
                 'tracking_kwargs':tracking_kwargs
