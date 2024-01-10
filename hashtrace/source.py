@@ -2,6 +2,7 @@ import os
 import io
 import re
 import sys
+import dis
 import json
 import types
 #import ctypes
@@ -29,8 +30,10 @@ import sqlite3
 import zlib
 archlib = zlib
 
-DEBUG = False
-DEBUG_SUBGRAPH = False
+VARSPACE = {
+    'DEBUG': False,
+    'DEBUG_SUBGRAPH': False,
+}
 
 ENCODING = 'utf-8'
 REPOSITORY_DIR = '.provenance'
@@ -548,7 +551,7 @@ graph_backend = ContainerGraph()
 # recursive version of save_graph
 def __save_subgraph_rec__(container):
     
-    if DEBUG: print('__save_subgraph_rec__>>>')
+    if VARSPACE['DEBUG']: print('__save_subgraph_rec__>>>')
  
     # get contained object
     obj = container.object
@@ -558,29 +561,29 @@ def __save_subgraph_rec__(container):
     
     # save parent containers
     parents = graph_backend.get_parent_containers(id(obj))
-    if DEBUG_SUBGRAPH: print('Get',container,'parents: ',parents)
+    if VARSPACE['DEBUG_SUBGRAPH']: print('Get',container,'parents: ',parents)
     for c in parents:
         lookup = Container.search(c.__hashval__)
         if not lookup:
-            if DEBUG_SUBGRAPH: print('Recurse into',container,'parent: ',c)
+            if VARSPACE['DEBUG_SUBGRAPH']: print('Recurse into',container,'parent: ',c)
             __save_subgraph_rec__(c)
         else:
-            if DEBUG_SUBGRAPH: print('Succesfully found',c,'(recursion break)')
+            if VARSPACE['DEBUG_SUBGRAPH']: print('Succesfully found',c,'(recursion break)')
     
     # save child containers
     children = graph_backend.get_child_containers(id(obj))
-    if DEBUG_SUBGRAPH: print('Get',container,'children: ',children)
+    if VARSPACE['DEBUG_SUBGRAPH']: print('Get',container,'children: ',children)
     for c in children:
         lookup = Container.search(c.__hashval__)
         if not lookup:
-            if DEBUG_SUBGRAPH: print('Recurse into',container,'child: ',c)
+            if VARSPACE['DEBUG_SUBGRAPH']: print('Recurse into',container,'child: ',c)
             __save_subgraph_rec__(c)
         else:
-            if DEBUG_SUBGRAPH: print('Succesfully found',c,'(recursion break)')
+            if VARSPACE['DEBUG_SUBGRAPH']: print('Succesfully found',c,'(recursion break)')
     
 def save_graph(*objs):
     """ Main saving function for objects/containers """
-    if DEBUG: print('save_graph>>>')
+    if VARSPACE['DEBUG']: print('save_graph>>>')
     for obj in objs:
         container = graph_backend.get_containers_by_object_ids(id(obj))[0]
         __save_subgraph_rec__(container)
@@ -590,7 +593,7 @@ class Container(ABC):
     __registry__ = {}
     
     def __init__(self,obj=None):
-        if DEBUG: print('Container.__init__>>>')
+        if VARSPACE['DEBUG']: print('Container.__init__>>>')
         if obj is None:
             return # allow empty init
         assert self.__contained_class__ is obj.__class__
@@ -613,7 +616,7 @@ class Container(ABC):
         
     @classmethod
     def create(cls,obj):
-        if DEBUG: print('Container.create>>>')
+        if VARSPACE['DEBUG']: print('Container.create>>>')
         obj_type = type(obj)
         if issubclass(obj_type,cls): # return unchanged, if container
             return obj 
@@ -648,10 +651,10 @@ class Container(ABC):
         
     @property
     def object(self):
-        if DEBUG: print('Container.object>>>',
+        if VARSPACE['DEBUG']: print('Container.object>>>',
             self,self.__classname__,self.__dict__.get('__object__').__class__.__name__)
         if '__object__' not in self.__dict__:
-            if DEBUG: print("'__object__' not in self.__dict__")
+            if VARSPACE['DEBUG']: print("'__object__' not in self.__dict__")
             self.__object__ = self.unpack()
         return self.__object__
         
@@ -670,7 +673,7 @@ class Container(ABC):
 class Decorator:
     """ Parser for decorators  """
     def __init__(self,decor_string):
-        if DEBUG: print('Decorator.__init__>>>')
+        if VARSPACE['DEBUG']: print('Decorator.__init__>>>')
         regex = '@([a-zA-Z][a-zA-Z0-9]*)(\(.+\))*'
         # get name and argstring
         name,argstring = re.search(regex,decor_string).groups()
@@ -694,7 +697,7 @@ class Decorator:
         self.kwargs = kwargs
 
 def strip_decorators(source):
-    if DEBUG: print('strip_decorators>>>')
+    if VARSPACE['DEBUG']: print('strip_decorators>>>')
     index = source.find("def ")
     decors = [
         line.strip().split()[0]
@@ -708,13 +711,13 @@ def strip_decorators(source):
     return decorators,body
 
 def create_module(name,code=''):
-    if DEBUG: print('create_module>>>')
+    if VARSPACE['DEBUG']: print('create_module>>>')
     module = types.ModuleType(name)
     exec(code, module.__dict__)
     return module
 
 def import_module_by_path(module_name,module_path):
-    if DEBUG: print('import_module_by_path>>>')
+    if VARSPACE['DEBUG']: print('import_module_by_path>>>')
     # https://www.geeksforgeeks.org/how-to-import-a-python-module-given-the-full-path/
     # https://stackoverflow.com/questions/67631/how-do-i-import-a-module-given-the-full-path
     #print(module_name,module_path)
@@ -740,7 +743,7 @@ class EncapsulatedFunction:
 
     def __init__(self,func=None):
         
-        if DEBUG: print('EncapsulatedFunction.__init__>>>')
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__init__>>>')
     
         if func is not None:
             
@@ -805,10 +808,26 @@ class EncapsulatedFunction:
     #@classmethod
     #def load_to_module(cls,hashval,buffer):
     #    pass
+    
+    @classmethod    
+    def check_globals(cls,func):   
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.check_globals>>>')    
+        if VARSPACE['DEBUG']: dis.dis(func) # show disassembly
+        fname = func.__name__
+        instructions = dis.get_instructions(func)
+        for i in instructions:
+            opname = i.opname.upper()
+            argval = i.argval
+            #print(opname)
+            if opname in {'LOAD_GLOBAL','LOAD_DEREF','LOAD_CLOSURE'}:
+                if argval==fname: continue
+                raise Exception(
+                    'EncapsulatedFunction "%s" is using '
+                    'global variable "%s" (%s)'%(fname,argval,opname))
         
     @classmethod
     def load_from_hash(cls,hashval,buffer,apply_decorator=True):
-        if DEBUG: print('EncapsulatedFunction.load_from_hash>>>')
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
         # get pathes for module
         subdir = hashval[:2]
         remainder = hashval[2:]
@@ -845,7 +864,7 @@ class EncapsulatedFunction:
     """
     @classmethod
     def load_from_hash(cls,hashval,buffer):
-        pif DEBUG: print('EncapsulatedFunction.load_from_hash>>>')
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
         # get pathes for module
         subdir = hashval[:2]
         remainder = hashval[2:]
@@ -877,7 +896,7 @@ class EncapsulatedFunction:
     """
 
     def dump(self):
-        if DEBUG: print('EncapsulatedFunction.dump>>>')
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.dump>>>')
         funcdict = {
             'source': self.__body__,
             'name': self.__name__,
@@ -893,7 +912,7 @@ class EncapsulatedFunction:
         return 'tmpmodule'
         
     def apply_decorator(self):
-        if DEBUG: print('EncapsulatedFunction.apply_decorator>>>')
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.apply_decorator>>>')
         funcname = self.__name__
         module = self.__module__
         function = getattr(module,funcname)
@@ -904,7 +923,7 @@ class EncapsulatedFunction:
         return function
         
     def __call__(self,*args,**kwargs):
-        if DEBUG: print('EncapsulatedFunction.__call__>>>')
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__call__>>>')
         return self.__func__(*args,**kwargs)        
 
 class Container_function_BAK3(Container):
@@ -913,14 +932,14 @@ class Container_function_BAK3(Container):
     __contained_class__ = (lambda:None).__class__
 
     def pack(self,obj):
-        if DEBUG: print('Container_function.pack>>>')
+        if VARSPACE['DEBUG']: print('Container_function.pack>>>')
         encfunc = EncapsulatedFunction(obj)
         buffer = encfunc.dump()
         hashval = calc_hash_str(buffer)
         return buffer, hashval
     
     def unpack(self):
-        if DEBUG: print('Container_function.unpack>>>')
+        if VARSPACE['DEBUG']: print('Container_function.unpack>>>')
         hashval = self.__hashval__
         buffer = self.__buffer__
         #encfunc = EncapsulatedFunction.load(self.__buffer__)
@@ -937,7 +956,8 @@ class Container_function(Container):
     __contained_class__ = (lambda:None).__class__
 
     def pack(self,obj):
-        if DEBUG: print('Container_function.pack>>>')
+        if VARSPACE['DEBUG']: print('Container_function.pack>>>')
+        EncapsulatedFunction.check_globals(obj)
         encfunc = EncapsulatedFunction(obj)
         buffer = encfunc.dump()
         hashval = calc_hash_str(buffer)
@@ -946,7 +966,7 @@ class Container_function(Container):
         return buffer, hashval
     
     def unpack(self):
-        if DEBUG: print('Container_function.unpack>>>')
+        if VARSPACE['DEBUG']: print('Container_function.unpack>>>')
         hashval = self.__hashval__
         buffer = self.__buffer__
         #encfunc = EncapsulatedFunction.load(self.__buffer__)
@@ -1120,7 +1140,7 @@ class Workflow(Referee):
         cache - caching flag
         """        
         
-        if DEBUG: print('Workflow.__init__>>>')
+        if VARSPACE['DEBUG']: print('Workflow.__init__>>>')
         
         # Convert input arguments to containers
         func = Container.create(func) if func else None
@@ -1191,7 +1211,7 @@ class Container_Workflow(Container):
     __contained_class__ = Workflow
     
     def pack(self,obj):
-        if DEBUG: print('Container_Workflow.pack>>>')
+        if VARSPACE['DEBUG']: print('Container_Workflow.pack>>>')
         refs = obj.references
         dct = {'refs':Referee.refs_to_dict(refs)}
         buffer = dump_to_string(dct)
@@ -1199,7 +1219,7 @@ class Container_Workflow(Container):
         return buffer, hashval
     
     def unpack(self):
-        if DEBUG: print('Container_Workflow.unpack>>>')
+        if VARSPACE['DEBUG']: print('Container_Workflow.unpack>>>')
         dct = load_from_string(self.__buffer__)
         w = Workflow()
         w.__references__ = Referee.refs_from_dict(dct['refs'])
@@ -1466,16 +1486,16 @@ Container.register(Container_Tree)
 # provenance decorator
 #def track(nout,autosave=False,cache=True):
 def track(*tracking_args,**tracking_kwargs):
-    if DEBUG: print('track>>>')
+    if VARSPACE['DEBUG']: print('track>>>')
     nout = tracking_kwargs.get('nout')
     if nout is None:
         nout = tracking_args[0]
     autosave = tracking_kwargs.get('autosave',False)
     cache = tracking_kwargs.get('cache',True)
     def inner(foo):
-        if DEBUG: print('inner>>>')
+        if VARSPACE['DEBUG']: print('inner>>>')
         def wrapper(*args,**kwargs):
-            if DEBUG: print('wrapper>>>')
+            if VARSPACE['DEBUG']: print('wrapper>>>')
             foo._tracking = {
                 'tracking_args':tracking_args,
                 'tracking_kwargs':tracking_kwargs
