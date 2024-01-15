@@ -735,7 +735,7 @@ def import_module_by_path(module_name,module_path):
     #spec.loader.exec_module(module)
     return module
 
-class EncapsulatedFunction:
+class EncapsulatedFunction_BAK:
     """
     Class for converting normal Python functions
     to the "encapsulated" ones to try and avoid hidden side-effects.
@@ -924,6 +924,118 @@ class EncapsulatedFunction:
         
     def __call__(self,*args,**kwargs):
         if VARSPACE['DEBUG']: print('EncapsulatedFunction.__call__>>>')
+        return self.__func__(*args,**kwargs)
+
+class EncapsulatedFunction:
+    """
+    Class for converting normal Python functions
+    to the "encapsulated" ones to try and avoid hidden side-effects.
+    """
+
+    def __init__(self,func=None):
+        
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__init__>>>')
+    
+        if func is not None:
+            
+            src = inspect.getsource(func)
+            src_ = textwrap.dedent(src)
+            
+            msg = 'currenlty no decorators are allowed '+\
+                'for both tracked and untracked functions'
+            
+            decorators,body = strip_decorators(src_)
+            if len(decorators)==0:
+                pass
+            elif len(decorators)==1:
+                decorator = decorators[0]
+                decor_value = eval(decorator.name)
+                if decor_value is not track:
+                    raise Exception(msg)
+            elif len(decorators)>1:
+                raise Exception(msg)
+                
+            module_name = self.generate_module_name()
+            self.__module_name__ = module_name
+            self.__module__ = create_module(module_name,body)
+            self.__name__ = func.__name__
+            self.__body__ = body
+            self.__func__ = self.invoke()
+        else:
+            self.__module_name__ = None
+            self.__module__ = None
+            self.__name__ = None
+            self.__body__ = None
+            self.__func__ = None
+        self.__funcdict__ = None # to be reused by child classes
+
+    @classmethod    
+    def check_globals(cls,func):   
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.check_globals>>>')    
+        if VARSPACE['DEBUG']: dis.dis(func) # show disassembly
+        fname = func.__name__
+        instructions = dis.get_instructions(func)
+        for i in instructions:
+            opname = i.opname.upper()
+            argval = i.argval
+            #print(opname)
+            if opname in {'LOAD_GLOBAL','LOAD_DEREF','LOAD_CLOSURE'}:
+                if argval==fname: continue
+                raise Exception(
+                    'EncapsulatedFunction "%s" is using '
+                    'global variable "%s" (%s)'%(fname,argval,opname))
+        
+    @classmethod
+    def load_from_hash(cls,hashval,buffer):
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
+        # get pathes for module
+        subdir = hashval[:2]
+        remainder = hashval[2:]
+        module_path = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        module_name = 'mod_'+remainder
+        # fill the object's fields
+        funcdict = load_from_string(buffer)
+        self.__funcdict__ = funcdict
+        body = funcdict['source']
+        name = funcdict['name']
+        obj = cls()
+        obj.__module_name__ = module_name
+        obj.__name__ = name
+        obj.__body__ = body
+        # create module path if not existing                    
+        if not os.path.exists(module_path):
+            os.makedirs(module_path)
+        # create module if not existing                    
+        filepath = os.path.join(module_path,module_name)+'.py'
+        if not os.path.exists(filepath):
+            with open(filepath,'w') as f:
+                f.write(body)
+        # load module and apply decorator
+        obj.__module__ = import_module_by_path(module_name,filepath)
+        obj.__func__ = getattr(obj.__module__,name)
+        return obj
+
+    def dump(self):
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.dump>>>')
+        funcdict = {
+            'source': self.__body__,
+            'name': self.__name__,
+        }
+        buffer = dump_to_string(funcdict,sort_keys=True)
+        return buffer
+        
+    def generate_module_name(self):
+        return 'tmpmodule'
+    
+    def invoke(self): # former apply_decorator
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.apply_decorator>>>')
+        funcname = self.__name__
+        module = self.__module__
+        function = getattr(module,funcname)
+        return function
+    
+    def __call__(self,*args,**kwargs):
+        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__call__>>>')
         return self.__func__(*args,**kwargs)        
 
 class Container_function_BAK3(Container):
@@ -962,7 +1074,7 @@ class Container_function(Container):
         buffer = encfunc.dump()
         hashval = calc_hash_str(buffer)
         self.__object__ = EncapsulatedFunction.load_from_hash(
-            hashval,buffer,apply_decorator=False) # strip off all context
+            hashval,buffer) # strip off all context
         return buffer, hashval
     
     def unpack(self):
@@ -1004,6 +1116,76 @@ class Container_function_BAK(Container):
         return 'function(%s)'%dct['name']
 
 Container.register(Container_function)
+
+class TrackedFunction(EncapsulatedFunction):
+    
+    def __init__(self,func,nout,tracking_options=None):
+        super().__init__(func)
+        if VARSPACE['DEBUG']: print('TrackedFunction.__init__>>>')        
+        if tracking_options is None: tracking_options = {}
+        self.__tracking_nout__ = nout
+        self.__tracking_options__ = tracking_options
+    
+    def get_tracking_option(self,argname,default_value):
+        argval = self.__tracking_options__.get(argname,default_value)
+        return argval
+    
+    def dump(self):
+        if VARSPACE['DEBUG']: print('TrackedFunction.dump>>>')
+        funcdict = {
+            'source': self.__body__,
+            'name': self.__name__,
+            'tracking_nout': self.__tracking_nout__,
+            'tracking_options': self.__tracking_options__,
+        }
+        buffer = dump_to_string(funcdict,sort_keys=True)
+        return buffer
+    
+    @classmethod
+    def load_from_hash(cls,hashval,buffer):
+        obj = super(TrackedFunction,cls).load_from_hash(hashval,buffer)
+        self.__tracking_nout__ = self.__funcdict__['tracking_nout']
+        self.__tracking_options__ = self.__funcdict__['tracking_options']
+        return obj
+    
+    """
+    def __call__(self,*args,**kwargs):
+        if VARSPACE['DEBUG']: print('TrackedFunction.__call__>>>')
+        nout = self.__tracking_nout__
+        autosave = self.get_tracking_option('autosave',False)
+        cache = self.get_tracking_option('cache',False)
+        w = Workflow(self,args=args,kwargs=kwargs,nout=nout)
+        cw = Container.create(w)
+        #graph_backend.__cache__[id(w)] = w # save workflow in cache
+        res = [output.object for output in w.outputs]
+        if len(res)==1: res = res[0]
+        if autosave: save_graph(w)
+    """
+
+class Container_tracked_function(Container):
+    
+    __contained_class__ = TrackedFunction
+
+    def pack(self,obj):
+        if VARSPACE['DEBUG']: print('Container_tracked_function.pack>>>')
+        TrackedFunction.check_globals(obj)
+        buffer = obj.dump()
+        hashval = calc_hash_str(buffer)
+        return buffer, hashval
+    
+    def unpack(self):
+        if VARSPACE['DEBUG']: print('Container_tracked_function.unpack>>>')
+        hashval = self.__hashval__
+        buffer = self.__buffer__
+        #encfunc = TrackedFunction.load(self.__buffer__)
+        encfunc = TrackedFunction.load_from_hash(hashval,buffer)
+        return encfunc.__func__
+        
+    def pretty_print(self):
+        dct = json.loads(self.__buffer__)
+        return 'function(%s)'%dct['name']
+
+Container.register(Container_tracked_function)
 
 #class Workflow: # OLD VERSION, INITIALIZED WITH CONTAINERS
 #    """
@@ -1128,7 +1310,7 @@ class Referee:
 class Workflow(Referee):
     """
     --------------------------------------------------
-    LIGHTWEIGHT VERSION OF THE WORKFLOW ("RUN") HEADER
+    HEAVYWEIGHT VERSION OF THE WORKFLOW ("RUN") HEADER
     --------------------------------------------------
     """
     def __init__(self,func=None,args=[],kwargs={},nout=1,cache=True):
@@ -1483,9 +1665,7 @@ class Container_Tree(Container):
 
 Container.register(Container_Tree)
 
-# provenance decorator
-#def track(nout,autosave=False,cache=True):
-def track(*tracking_args,**tracking_kwargs):
+def track_BAK(*tracking_args,**tracking_kwargs):
     if VARSPACE['DEBUG']: print('track>>>')
     nout = tracking_kwargs.get('nout')
     if nout is None:
@@ -1509,3 +1689,13 @@ def track(*tracking_args,**tracking_kwargs):
             return res
         return wrapper
     return inner
+
+# provenance decorator
+def track(nout,**tracking_options):
+    def inner(foo):
+        tfun = TrackedFunction(foo,nout=nout,
+            tracking_options=tracking_options,
+        )
+        return tfun
+    return inner
+
