@@ -1161,6 +1161,61 @@ class TrackedFunction(EncapsulatedFunction):
         if len(res)==1: res = res[0]
         if autosave: save_graph(w)
     """
+    
+    def __call__(self,*args,**kwargs):
+        
+        # heavy-weighted version of call like in previous Workflow implementation
+        
+        # ATTENTION: args and kwargs should not be changed within
+        # this function, otherwise the all algrythm of creating workflow
+        # will break!
+        # In other words, the __call__ method should be side effect-free.
+        
+        if VARSPACE['DEBUG']: print('TrackedFunction.__call__>>>')
+        
+        # Get tracking options.
+        nout = self.__tracking_nout__
+        autosave = self.get_tracking_option('autosave',False)
+        cache = self.get_tracking_option('cache',False)        
+                
+        # Create the FunctionCall object and containerize it.
+        fcall = FunctionCall(self,args,kwargs)
+        cfcall = Container.create(fcall)
+        
+        # Check if caching is enabled.
+        if cache:
+            
+            # how to cache properly?            
+            raise NotImplementedError            
+        
+        else:            
+            
+            # run the function from scratch and create a workflow            
+            outs = self.__func__(
+                *args,
+                **kwargs,
+            )
+            
+            if nout==1: 
+                outputs = [outs,]
+            else:
+                outputs = outs
+            
+            # containerize the outputs
+            coutputs = [Container.create(out) for out in outputs]
+            
+            # create the new Workflow object and containerize it.
+            w = Workflow()
+            w.add_reference(Reference(container=cfcall),reftype='fcall',meta=None)
+            for i,cout in enumerate(coutputs):
+                w.add_reference(Reference(container=cout),reftype='output',meta=i)
+            cw = Container.create(w)
+            
+            # Save the new graph if needed.
+            if autosave: save_graph(w)
+            
+        # Return the original output.
+        return outs
 
 class Container_tracked_function(Container):
     
@@ -1298,7 +1353,7 @@ class Referee:
                 'meta':item['meta'],
             }
         return refs
-        
+
     @property
     def references(self):
         return self.__references__
@@ -1307,7 +1362,123 @@ class Referee:
         tab = self.references.tabulate(raw=True)
         return '<<<< %s >>>>:\n%s'%(self.__class__.__name__,tab)
 
+class FunctionCall(Referee):
+    
+    def __init__(self,func=None,args=[],kwargs={}):
+
+        if VARSPACE['DEBUG']: print('FunctionCall.__init__>>>')
+        
+        # Convert input arguments to containers
+        func = Container.create(func) if func else None
+        args = [Container.create(arg) for arg in args]
+        kwargs = {kwarg:Container.create(kwargs[kwarg]) \
+            for kwarg in kwargs}
+        
+        # setup ref for function
+        self.add_reference(Reference(container=func),reftype='function',meta=None)
+        
+        # setup refs for args
+        for i,arg in enumerate(args):
+            self.add_reference(Reference(container=arg),reftype='arg',meta=i)
+        
+        # setup refs for kwargs
+        for key in kwargs:
+            kwarg = kwargs[key]
+            self.add_reference(Reference(container=kwarg),reftype='kwarg',meta=key)
+                
+    @property
+    def function(self):
+        return self.get_references('function').getcol('reference')[0].container
+        
+    @property
+    def args(self):    
+        refs = self.get_references('arg') 
+        return [ref.container for ref in refs.getcol('reference',IDs=refs.sort('meta'))]
+
+    @property
+    def kwargs(self):
+        refs = self.get_references('kwarg')
+        dct = {}
+        for key,ref in zip(*refs.getcols(['meta','reference'])):
+            dct[key] = ref.container
+        return dct
+
+# this can be merged with Container_Workflow in the next refactor since they do the same thing
+class Container_FunctionCall(Container):
+    
+    __contained_class__ = FunctionCall
+    
+    def pack(self,obj):
+        if VARSPACE['DEBUG']: print('Container_FunctionCall.pack>>>')
+        refs = obj.references
+        dct = {'refs':Referee.refs_to_dict(refs)}
+        buffer = dump_to_string(dct)
+        hashval = calc_hash_dict(dct)
+        return buffer, hashval
+    
+    def unpack(self):
+        if VARSPACE['DEBUG']: print('Container_FunctionCall.unpack>>>')
+        dct = load_from_string(self.__buffer__)
+        w = FunctionCall()
+        w.__references__ = Referee.refs_from_dict(dct['refs'])
+        return w
+
 class Workflow(Referee):
+    
+    def __init__(self,fcall=None,outputs=[]):
+        
+        # Convert input arguments to containers
+        fcall = Container.create(fcall) if fcall else None
+        outputs = [Container.create(out) for out in outputs]
+        
+        # setup ref for function call
+        self.add_reference(Reference(container=fcall),reftype='fcall',meta=None)
+        
+        # setup refs for outputs
+        for i,out in enumerate(outputs):
+            self.add_reference(Reference(container=out),reftype='output',meta=i)
+
+    @property
+    def fcall(self):    
+        return self.get_references('fcall').getcol('reference')[0].container
+            
+    @property
+    def outputs(self):    
+        refs = self.get_references('output')
+        return [ref.container for ref in refs.getcol('reference',IDs=refs.sort('meta'))]
+        
+    @property
+    def function(self):
+        return self.fcall.object.function
+        
+    @property
+    def args(self):    
+        return self.fcall.object.args
+
+    @property
+    def kwargs(self):
+        return self.fcall.object.kwargs
+
+class Container_Workflow(Container):
+    
+    __contained_class__ = Workflow
+    
+    def pack(self,obj):
+        if VARSPACE['DEBUG']: print('Container_Workflow.pack>>>')
+        refs = obj.references
+        dct = {'refs':Referee.refs_to_dict(refs)}
+        buffer = dump_to_string(dct)
+        hashval = calc_hash_dict(dct)
+        return buffer, hashval
+    
+    def unpack(self):
+        if VARSPACE['DEBUG']: print('Container_Workflow.unpack>>>')
+        dct = load_from_string(self.__buffer__)
+        w = Workflow()
+        w.__references__ = Referee.refs_from_dict(dct['refs'])
+        return w
+
+class Workflow_BAK(Referee):
     """
     --------------------------------------------------
     HEAVYWEIGHT VERSION OF THE WORKFLOW ("RUN") HEADER
@@ -1330,15 +1501,15 @@ class Workflow(Referee):
         kwargs = {kwarg:Container.create(kwargs[kwarg]) \
             for kwarg in kwargs}
         
-        # containerize args and kwargs
-        if func:
-            argspec = inspect.getfullargspec(func.object)
-            argnames = argspec.args
-        else:
-            argnames = []
+        # calculate and containerize outputs
+        #if func:
+        #    argspec = inspect.getfullargspec(func.object)
+        #    argnames = argspec.args
+        #else:
+        #    argnames = []
                                         
         if func:                        
-            # calculate and containerize outputs
+            
             outs = func.object(
                 *[arg.object for arg in args],
                 **{kwarg:kwargs[kwarg].object for kwarg in kwargs},
@@ -1388,7 +1559,7 @@ class Workflow(Referee):
         refs = self.get_references('output') 
         return [ref.container for ref in refs.getcol('reference',IDs=refs.sort('meta'))]
 
-class Container_Workflow(Container):
+class Container_Workflow_BAK(Container):
     
     __contained_class__ = Workflow
     
