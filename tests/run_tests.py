@@ -1,3 +1,4 @@
+import os
 import sys
 import json
 
@@ -18,11 +19,74 @@ def test_dummy():
     t = time()-t
     return t,col
 
+def test_drop():
+    """ simple test on droping local backend """    
+    
+    t = time()
+    col = Collection()
+    
+    from random import choice
+    from string import ascii_letters
+    
+    root = SETTINGS['REPOSITORY_DIR']
+    #db_backend = SETTINGS[???] # TODO!!!
+    
+    def random_string(n=10):
+        return ''.join([choice(ascii_letters) for _ in range(n)])
+    
+    def create_random_file(path):
+        with open(path,'w') as f:
+            f.write(random_string(n=100))
+        print('  created file',path)
+    
+    def create_random_dir():
+        dirname = random_string(n=10)
+        path=os.path.join(root,dirname)
+        os.mkdir(path)
+        print('created dir',path)
+        return dirname
+    
+    def fill_dir(dirname,nfiles):
+        for _ in range(nfiles):
+            filename = random_string(n=5)
+            path = os.path.join(root,dirname,filename)
+            create_random_file(path)
+                
+    # create random dirs
+    ndirs = 3
+    for _ in range(ndirs):
+        dirname = create_random_dir()
+        fill_dir(dirname,nfiles=5)
+
+    print('')
+    
+    # drop all content
+    db_backend.drop()
+    
+    print('\ndropped content successfuly')
+    
+    t = time()-t
+    return t,col
+        
+def test_():
+    """  """    
+
+    t = time()
+    col = Collection()
+
+
+    t = time()-t
+    return t,col
+
+
 def test_sum_1():
     """ simple test on tracking, no caching, no autosave """    
 
     t = time()
     col = Collection()
+    
+    # drop the local repository
+    db_backend.drop()
     
     @track(nout=1,cache=False,autosave=False)
     def plus(a,b):
@@ -35,8 +99,12 @@ def test_sum_1():
     t = time()-t
     return t,col
 
+def test_pass_tfunc():
+    """ test on passing the other tracked as an argument """
+    pass
+
 TEST_CASES = [
-    test_sum_1,
+    
 ]
 
 def get_test_cases(func_names):
@@ -83,9 +151,9 @@ if __name__=='__main__':
         
     args = parser.parse_args() 
 
-    VARSPACE['VERBOSE'] = args.verbose
-    VARSPACE['DEBUG'] = args.debug
-    VARSPACE['BREAKPOINTS'] = args.breakpoints    
+    SETTINGS['VERBOSE'] = args.verbose
+    SETTINGS['DEBUG'] = args.debug
+    SETTINGS['BREAKPOINTS'] = args.breakpoints    
         
     test_cases = get_test_cases(args.cases)
         

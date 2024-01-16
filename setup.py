@@ -18,5 +18,6 @@ setup(
         "jeanny3",
         "numpy",
         "tabulate",
+        "networkx",
     ],
 )
