@@ -8,6 +8,7 @@ import types
 #import ctypes
 #import pickle # should be used only with elementary types!!!
 #import dill # uses pickle; can serialize types
+import shutil
 import hashlib
 import inspect
 import binascii
@@ -30,27 +31,36 @@ import sqlite3
 import zlib
 archlib = zlib
 
-VARSPACE = {
+SETTINGS = {
+    'ENCODING': 'utf-8',
+    'REPOSITORY_DIR': '.provenance',
     'DEBUG': False,
     'DEBUG_SUBGRAPH': False,
 }
 
-ENCODING = 'utf-8'
-REPOSITORY_DIR = '.provenance'
+VARSPACE = {}
+
+#VARSPACE = {
+#    'DEBUG': False,
+#    'DEBUG_SUBGRAPH': False,
+#}
+
+#ENCODING = 'utf-8'
+#REPOSITORY_DIR = '.provenance'
 
 def calc_hash_sha256_bin(binbuf):
     """ Hash function must return digest. Buffer must be a UTF-8 string. """
     m = hashlib.sha256()
     m.update(binbuf)
     return m.hexdigest()
-calc_hash_sha256_str = lambda strbuf: calc_hash_sha256_bin(strbuf.encode(ENCODING)) 
+calc_hash_sha256_str = lambda strbuf: calc_hash_sha256_bin(strbuf.encode(SETTINGS['ENCODING'])) 
 
 def calc_hash_md5_bin(binbuf):
     """ Hash function must return digest. Buffer must be a UTF-8 string. """
     m = hashlib.md5()
     m.update(binbuf)
     return m.hexdigest()
-calc_hash_md5_str = lambda strbuf: calc_hash_md5_bin(strbuf.encode(ENCODING)) 
+calc_hash_md5_str = lambda strbuf: calc_hash_md5_bin(strbuf.encode(SETTINGS['ENCODING'])) 
 
 #calc_hash_str = calc_hash_sha256_str
 #calc_hash_bin = calc_hash_sha256_bin
@@ -65,7 +75,7 @@ def encrypt_xor(var, key): # free from the "signed" hexadecimal hash bug
     a = np.frombuffer(var, dtype = np.uint8)
     b = np.frombuffer(key, dtype = np.uint8)
     result = (a^b).tobytes()
-    return binascii.hexlify(result).decode(ENCODING)
+    return binascii.hexlify(result).decode(SETTINGS['ENCODING'])
 
 def hashsum_list_noorder(hashlist):
     """ Calculate sum of hashes to produce an order-invariant hash.
@@ -82,7 +92,7 @@ def encrypt_impl(var, key):
     a = np.frombuffer(var, dtype = np.uint8)
     b = np.frombuffer(key, dtype = np.uint8)
     result = (np.invert(a)|b).tobytes()
-    return binascii.hexlify(result).decode(ENCODING)
+    return binascii.hexlify(result).decode(SETTINGS['ENCODING'])
 
 def hashsum_list_order(hashlist):
     """ Calculate sum of hashes to produce an order-dependent hash.
@@ -191,15 +201,20 @@ class BackendDispatcher(ABC):
     def tabulate(self,limit=20,offset=0):
         """ tabulate container list """
         pass
+        
+    @abstractmethod
+    def drop(self):
+        """ drop local storage (mostly for testing purposes) """
+        pass
 
 class CSVBackend(BackendDispatcher):
     """
     Pure Collection backend - all data are situated in RAM.
     """
-    def __init__(self,filename='headers.csv'):
+    def __init__(self):
         self.__collection__ = j.Collection()
     
-    #def connect(self,filename):
+    def connect(self,filename):
         col = j.Collection(); col.import_csv(filename,duck=False)
         dicthash = {}
         for item in col.getitems():
@@ -247,23 +262,28 @@ class CSVBackend(BackendDispatcher):
     def insert(self,container):
         self.__collection__.__dicthash__[container.__hashval__] = \
             {'container':container}
+            
+    def drop(self):
+        self.__collection__.clear()
 
 class SQLiteBackend(BackendDispatcher):
     """
-    SQLite-based backend splitted in two parts, both situated in ".libra" subfolder.
-    1) Header table situated in the SQLite file.
-    2) Content filesystem is organized in Git-like manner.
+    SQLite-based backend is splitted in two parts, both situated 
+    in local repository subfolder:
+        1) Header table situated in the SQLite file.
+        2) Content filesystem is organized in Git-like manner (by hashes).
     Header table contain only two columns: ContainerType and Hash.
     """
     def __init__(self,database='headers.sqlite'):
         # open connection to database
-        dbpath = os.path.join(REPOSITORY_DIR,database)
-        os.makedirs(REPOSITORY_DIR,exist_ok=True)
+        dbpath = os.path.join(SETTINGS['REPOSITORY_DIR'],database)
+        os.makedirs(SETTINGS['REPOSITORY_DIR'],exist_ok=True)
         connection = sqlite3.connect(dbpath)
         connection.row_factory = sqlite3.Row
         cursor = connection.cursor()
         self.__connection__ = connection
         self.__cursor__ = cursor
+        self.__dbfile__ = database
         # create header table if not exists
         cursor.execute(
             'create table if not exists content('
@@ -302,7 +322,7 @@ class SQLiteBackend(BackendDispatcher):
         """ aux method"""
         subdir = hashval[:2]
         remainder = hashval[2:]
-        filepath = os.path.join(REPOSITORY_DIR,'objects',subdir,remainder)
+        filepath = os.path.join(SETTINGS['REPOSITORY_DIR'],'objects',subdir,remainder)
         if not os.path.isfile(filepath): return None
         with open(filepath) as f:
             return f.read()
@@ -313,7 +333,7 @@ class SQLiteBackend(BackendDispatcher):
         hashval = container.__hashval__
         subdir = hashval[:2]
         remainder = hashval[2:]
-        dirpath = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        dirpath = os.path.join(SETTINGS['REPOSITORY_DIR'],'objects',subdir)
         os.makedirs(dirpath,exist_ok=True)
         filepath = os.path.join(dirpath,remainder)
         #with open(filepath,'wb') as f:
@@ -373,6 +393,26 @@ class SQLiteBackend(BackendDispatcher):
         rows = cursor.fetchall()
         col.update([dict(row) for row in rows])
         return col
+        
+    def drop(self):
+        # drop content table
+        cursor = self.__cursor__
+        connection = self.__connection__
+        dbfile = self.__dbfile__
+        print('deleting from content table')
+        cursor.execute('delete from content')
+        connection.commit()
+        # delete the contents of the filetree
+        nodes = os.listdir(SETTINGS['REPOSITORY_DIR'])
+        for node in nodes:
+            if node==dbfile: continue
+            path = os.path.join(SETTINGS['REPOSITORY_DIR'],node)
+            if os.path.isfile(path):
+                print('removing file',path)
+                os.remove(path)
+            elif os.path.isdir(path):
+                print('removing dir',path)
+                shutil.rmtree(path)
 
 db_backend = SQLiteBackend()
 
@@ -551,7 +591,7 @@ graph_backend = ContainerGraph()
 # recursive version of save_graph
 def __save_subgraph_rec__(container):
     
-    if VARSPACE['DEBUG']: print('__save_subgraph_rec__>>>')
+    if SETTINGS['DEBUG']: print('__save_subgraph_rec__>>>')
  
     # get contained object
     obj = container.object
@@ -561,29 +601,29 @@ def __save_subgraph_rec__(container):
     
     # save parent containers
     parents = graph_backend.get_parent_containers(id(obj))
-    if VARSPACE['DEBUG_SUBGRAPH']: print('Get',container,'parents: ',parents)
+    if SETTINGS['DEBUG_SUBGRAPH']: print('Get',container,'parents: ',parents)
     for c in parents:
         lookup = Container.search(c.__hashval__)
         if not lookup:
-            if VARSPACE['DEBUG_SUBGRAPH']: print('Recurse into',container,'parent: ',c)
+            if SETTINGS['DEBUG_SUBGRAPH']: print('Recurse into',container,'parent: ',c)
             __save_subgraph_rec__(c)
         else:
-            if VARSPACE['DEBUG_SUBGRAPH']: print('Succesfully found',c,'(recursion break)')
+            if SETTINGS['DEBUG_SUBGRAPH']: print('Succesfully found',c,'(recursion break)')
     
     # save child containers
     children = graph_backend.get_child_containers(id(obj))
-    if VARSPACE['DEBUG_SUBGRAPH']: print('Get',container,'children: ',children)
+    if SETTINGS['DEBUG_SUBGRAPH']: print('Get',container,'children: ',children)
     for c in children:
         lookup = Container.search(c.__hashval__)
         if not lookup:
-            if VARSPACE['DEBUG_SUBGRAPH']: print('Recurse into',container,'child: ',c)
+            if SETTINGS['DEBUG_SUBGRAPH']: print('Recurse into',container,'child: ',c)
             __save_subgraph_rec__(c)
         else:
-            if VARSPACE['DEBUG_SUBGRAPH']: print('Succesfully found',c,'(recursion break)')
+            if SETTINGS['DEBUG_SUBGRAPH']: print('Succesfully found',c,'(recursion break)')
     
 def save_graph(*objs):
     """ Main saving function for objects/containers """
-    if VARSPACE['DEBUG']: print('save_graph>>>')
+    if SETTINGS['DEBUG']: print('save_graph>>>')
     for obj in objs:
         container = graph_backend.get_containers_by_object_ids(id(obj))[0]
         __save_subgraph_rec__(container)
@@ -593,7 +633,7 @@ class Container(ABC):
     __registry__ = {}
     
     def __init__(self,obj=None):
-        if VARSPACE['DEBUG']: print('Container.__init__>>>')
+        if SETTINGS['DEBUG']: print('Container.__init__>>>')
         if obj is None:
             return # allow empty init
         assert self.__contained_class__ is obj.__class__
@@ -616,7 +656,7 @@ class Container(ABC):
         
     @classmethod
     def create(cls,obj):
-        if VARSPACE['DEBUG']: print('Container.create>>>')
+        if SETTINGS['DEBUG']: print('Container.create>>>')
         obj_type = type(obj)
         if issubclass(obj_type,cls): # return unchanged, if container
             return obj 
@@ -651,10 +691,10 @@ class Container(ABC):
         
     @property
     def object(self):
-        if VARSPACE['DEBUG']: print('Container.object>>>',
+        if SETTINGS['DEBUG']: print('Container.object>>>',
             self,self.__classname__,self.__dict__.get('__object__').__class__.__name__)
         if '__object__' not in self.__dict__:
-            if VARSPACE['DEBUG']: print("'__object__' not in self.__dict__")
+            if SETTINGS['DEBUG']: print("'__object__' not in self.__dict__")
             self.__object__ = self.unpack()
         return self.__object__
         
@@ -673,7 +713,7 @@ class Container(ABC):
 class Decorator:
     """ Parser for decorators  """
     def __init__(self,decor_string):
-        if VARSPACE['DEBUG']: print('Decorator.__init__>>>')
+        if SETTINGS['DEBUG']: print('Decorator.__init__>>>')
         regex = '@([a-zA-Z][a-zA-Z0-9]*)(\(.+\))*'
         # get name and argstring
         name,argstring = re.search(regex,decor_string).groups()
@@ -697,7 +737,7 @@ class Decorator:
         self.kwargs = kwargs
 
 def strip_decorators(source):
-    if VARSPACE['DEBUG']: print('strip_decorators>>>')
+    if SETTINGS['DEBUG']: print('strip_decorators>>>')
     index = source.find("def ")
     decors = [
         line.strip().split()[0]
@@ -711,13 +751,13 @@ def strip_decorators(source):
     return decorators,body
 
 def create_module(name,code=''):
-    if VARSPACE['DEBUG']: print('create_module>>>')
+    if SETTINGS['DEBUG']: print('create_module>>>')
     module = types.ModuleType(name)
     exec(code, module.__dict__)
     return module
 
 def import_module_by_path(module_name,module_path):
-    if VARSPACE['DEBUG']: print('import_module_by_path>>>')
+    if SETTINGS['DEBUG']: print('import_module_by_path>>>')
     # https://www.geeksforgeeks.org/how-to-import-a-python-module-given-the-full-path/
     # https://stackoverflow.com/questions/67631/how-do-i-import-a-module-given-the-full-path
     #print(module_name,module_path)
@@ -743,7 +783,7 @@ class EncapsulatedFunction_BAK:
 
     def __init__(self,func=None):
         
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__init__>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.__init__>>>')
     
         if func is not None:
             
@@ -811,8 +851,8 @@ class EncapsulatedFunction_BAK:
     
     @classmethod    
     def check_globals(cls,func):   
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.check_globals>>>')    
-        if VARSPACE['DEBUG']: dis.dis(func) # show disassembly
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.check_globals>>>')    
+        if SETTINGS['DEBUG']: dis.dis(func) # show disassembly
         fname = func.__name__
         instructions = dis.get_instructions(func)
         for i in instructions:
@@ -827,11 +867,11 @@ class EncapsulatedFunction_BAK:
         
     @classmethod
     def load_from_hash(cls,hashval,buffer,apply_decorator=True):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
         # get pathes for module
         subdir = hashval[:2]
         remainder = hashval[2:]
-        module_path = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        module_path = os.path.join(SETTINGS['REPOSITORY_DIR'],'objects',subdir)
         module_name = 'mod_'+remainder
         # fill the object's fields
         funcdict = load_from_string(buffer)
@@ -864,11 +904,11 @@ class EncapsulatedFunction_BAK:
     """
     @classmethod
     def load_from_hash(cls,hashval,buffer):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
         # get pathes for module
         subdir = hashval[:2]
         remainder = hashval[2:]
-        module_path = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        module_path = os.path.join(SETTINGS['REPOSITORY_DIR'],'objects',subdir)
         module_name = 'mod_'+remainder
         # fill the object's fields
         funcdict = load_from_string(buffer)
@@ -896,7 +936,7 @@ class EncapsulatedFunction_BAK:
     """
 
     def dump(self):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.dump>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.dump>>>')
         funcdict = {
             'source': self.__body__,
             'name': self.__name__,
@@ -912,7 +952,7 @@ class EncapsulatedFunction_BAK:
         return 'tmpmodule'
         
     def apply_decorator(self):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.apply_decorator>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.apply_decorator>>>')
         funcname = self.__name__
         module = self.__module__
         function = getattr(module,funcname)
@@ -923,7 +963,7 @@ class EncapsulatedFunction_BAK:
         return function
         
     def __call__(self,*args,**kwargs):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__call__>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.__call__>>>')
         return self.__func__(*args,**kwargs)
 
 class EncapsulatedFunction:
@@ -934,7 +974,7 @@ class EncapsulatedFunction:
 
     def __init__(self,func=None):
         
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__init__>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.__init__>>>')
     
         if func is not None:
             
@@ -971,8 +1011,8 @@ class EncapsulatedFunction:
 
     @classmethod    
     def check_globals(cls,func):   
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.check_globals>>>')    
-        if VARSPACE['DEBUG']: dis.dis(func) # show disassembly
+        if SETTINGS['DEBUG']: print('%s.check_globals>>>'%cls.__name__)    
+        if SETTINGS['DEBUG']: dis.dis(func) # show disassembly
         fname = func.__name__
         instructions = dis.get_instructions(func)
         for i in instructions:
@@ -987,18 +1027,18 @@ class EncapsulatedFunction:
         
     @classmethod
     def load_from_hash(cls,hashval,buffer):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.load_from_hash>>>')
         # get pathes for module
         subdir = hashval[:2]
         remainder = hashval[2:]
-        module_path = os.path.join(REPOSITORY_DIR,'objects',subdir)
+        module_path = os.path.join(SETTINGS['REPOSITORY_DIR'],'objects',subdir)
         module_name = 'mod_'+remainder
         # fill the object's fields
         funcdict = load_from_string(buffer)
-        self.__funcdict__ = funcdict
         body = funcdict['source']
         name = funcdict['name']
         obj = cls()
+        obj.__funcdict__ = funcdict
         obj.__module_name__ = module_name
         obj.__name__ = name
         obj.__body__ = body
@@ -1016,7 +1056,7 @@ class EncapsulatedFunction:
         return obj
 
     def dump(self):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.dump>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.dump>>>')
         funcdict = {
             'source': self.__body__,
             'name': self.__name__,
@@ -1028,14 +1068,14 @@ class EncapsulatedFunction:
         return 'tmpmodule'
     
     def invoke(self): # former apply_decorator
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.apply_decorator>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.invoke>>>')
         funcname = self.__name__
         module = self.__module__
         function = getattr(module,funcname)
         return function
     
     def __call__(self,*args,**kwargs):
-        if VARSPACE['DEBUG']: print('EncapsulatedFunction.__call__>>>')
+        if SETTINGS['DEBUG']: print('EncapsulatedFunction.__call__>>>')
         return self.__func__(*args,**kwargs)        
 
 class Container_function_BAK3(Container):
@@ -1044,14 +1084,14 @@ class Container_function_BAK3(Container):
     __contained_class__ = (lambda:None).__class__
 
     def pack(self,obj):
-        if VARSPACE['DEBUG']: print('Container_function.pack>>>')
+        if SETTINGS['DEBUG']: print('Container_function.pack>>>')
         encfunc = EncapsulatedFunction(obj)
         buffer = encfunc.dump()
         hashval = calc_hash_str(buffer)
         return buffer, hashval
     
     def unpack(self):
-        if VARSPACE['DEBUG']: print('Container_function.unpack>>>')
+        if SETTINGS['DEBUG']: print('Container_function.unpack>>>')
         hashval = self.__hashval__
         buffer = self.__buffer__
         #encfunc = EncapsulatedFunction.load(self.__buffer__)
@@ -1068,7 +1108,7 @@ class Container_function(Container):
     __contained_class__ = (lambda:None).__class__
 
     def pack(self,obj):
-        if VARSPACE['DEBUG']: print('Container_function.pack>>>')
+        if SETTINGS['DEBUG']: print('Container_function.pack>>>')
         EncapsulatedFunction.check_globals(obj)
         encfunc = EncapsulatedFunction(obj)
         buffer = encfunc.dump()
@@ -1078,7 +1118,7 @@ class Container_function(Container):
         return buffer, hashval
     
     def unpack(self):
-        if VARSPACE['DEBUG']: print('Container_function.unpack>>>')
+        if SETTINGS['DEBUG']: print('Container_function.unpack>>>')
         hashval = self.__hashval__
         buffer = self.__buffer__
         #encfunc = EncapsulatedFunction.load(self.__buffer__)
@@ -1119,9 +1159,9 @@ Container.register(Container_function)
 
 class TrackedFunction(EncapsulatedFunction):
     
-    def __init__(self,func,nout,tracking_options=None):
+    def __init__(self,func=None,nout=None,tracking_options=None):
         super().__init__(func)
-        if VARSPACE['DEBUG']: print('TrackedFunction.__init__>>>')        
+        if SETTINGS['DEBUG']: print('TrackedFunction.__init__>>>')        
         if tracking_options is None: tracking_options = {}
         self.__tracking_nout__ = nout
         self.__tracking_options__ = tracking_options
@@ -1131,7 +1171,7 @@ class TrackedFunction(EncapsulatedFunction):
         return argval
     
     def dump(self):
-        if VARSPACE['DEBUG']: print('TrackedFunction.dump>>>')
+        if SETTINGS['DEBUG']: print('TrackedFunction.dump>>>')
         funcdict = {
             'source': self.__body__,
             'name': self.__name__,
@@ -1144,13 +1184,13 @@ class TrackedFunction(EncapsulatedFunction):
     @classmethod
     def load_from_hash(cls,hashval,buffer):
         obj = super(TrackedFunction,cls).load_from_hash(hashval,buffer)
-        self.__tracking_nout__ = self.__funcdict__['tracking_nout']
-        self.__tracking_options__ = self.__funcdict__['tracking_options']
+        obj.__tracking_nout__ = obj.__funcdict__['tracking_nout']
+        obj.__tracking_options__ = obj.__funcdict__['tracking_options']
         return obj
     
     """
     def __call__(self,*args,**kwargs):
-        if VARSPACE['DEBUG']: print('TrackedFunction.__call__>>>')
+        if SETTINGS['DEBUG']: print('TrackedFunction.__call__>>>')
         nout = self.__tracking_nout__
         autosave = self.get_tracking_option('autosave',False)
         cache = self.get_tracking_option('cache',False)
@@ -1167,11 +1207,10 @@ class TrackedFunction(EncapsulatedFunction):
         # heavy-weighted version of call like in previous Workflow implementation
         
         # ATTENTION: args and kwargs should not be changed within
-        # this function, otherwise the all algrythm of creating workflow
-        # will break!
+        # this function, otherwise the all algrythm of creating workflow will break!
         # In other words, the __call__ method should be side effect-free.
         
-        if VARSPACE['DEBUG']: print('TrackedFunction.__call__>>>')
+        if SETTINGS['DEBUG']: print('TrackedFunction.__call__>>>')
         
         # Get tracking options.
         nout = self.__tracking_nout__
@@ -1217,30 +1256,30 @@ class TrackedFunction(EncapsulatedFunction):
         # Return the original output.
         return outs
 
-class Container_tracked_function(Container):
+class Container_TrackedFunction(Container):
     
     __contained_class__ = TrackedFunction
 
     def pack(self,obj):
-        if VARSPACE['DEBUG']: print('Container_tracked_function.pack>>>')
+        if SETTINGS['DEBUG']: print('Container_TrackedFunction.pack>>>')
         TrackedFunction.check_globals(obj)
         buffer = obj.dump()
         hashval = calc_hash_str(buffer)
         return buffer, hashval
     
     def unpack(self):
-        if VARSPACE['DEBUG']: print('Container_tracked_function.unpack>>>')
+        if SETTINGS['DEBUG']: print('Container_TrackedFunction.unpack>>>')
         hashval = self.__hashval__
         buffer = self.__buffer__
         #encfunc = TrackedFunction.load(self.__buffer__)
         encfunc = TrackedFunction.load_from_hash(hashval,buffer)
-        return encfunc.__func__
+        return encfunc
         
     def pretty_print(self):
         dct = json.loads(self.__buffer__)
         return 'function(%s)'%dct['name']
 
-Container.register(Container_tracked_function)
+Container.register(Container_TrackedFunction)
 
 #class Workflow: # OLD VERSION, INITIALIZED WITH CONTAINERS
 #    """
@@ -1366,7 +1405,7 @@ class FunctionCall(Referee):
     
     def __init__(self,func=None,args=[],kwargs={}):
 
-        if VARSPACE['DEBUG']: print('FunctionCall.__init__>>>')
+        if SETTINGS['DEBUG']: print('FunctionCall.__init__>>>')
         
         # Convert input arguments to containers
         func = Container.create(func) if func else None
@@ -1375,7 +1414,7 @@ class FunctionCall(Referee):
             for kwarg in kwargs}
         
         # setup ref for function
-        self.add_reference(Reference(container=func),reftype='function',meta=None)
+        if func: self.add_reference(Reference(container=func),reftype='function',meta=None)
         
         # setup refs for args
         for i,arg in enumerate(args):
@@ -1409,7 +1448,7 @@ class Container_FunctionCall(Container):
     __contained_class__ = FunctionCall
     
     def pack(self,obj):
-        if VARSPACE['DEBUG']: print('Container_FunctionCall.pack>>>')
+        if SETTINGS['DEBUG']: print('Container_FunctionCall.pack>>>')
         refs = obj.references
         dct = {'refs':Referee.refs_to_dict(refs)}
         buffer = dump_to_string(dct)
@@ -1417,11 +1456,13 @@ class Container_FunctionCall(Container):
         return buffer, hashval
     
     def unpack(self):
-        if VARSPACE['DEBUG']: print('Container_FunctionCall.unpack>>>')
+        if SETTINGS['DEBUG']: print('Container_FunctionCall.unpack>>>')
         dct = load_from_string(self.__buffer__)
         w = FunctionCall()
         w.__references__ = Referee.refs_from_dict(dct['refs'])
         return w
+
+Container.register(Container_FunctionCall)
 
 class Workflow(Referee):
     
@@ -1432,7 +1473,7 @@ class Workflow(Referee):
         outputs = [Container.create(out) for out in outputs]
         
         # setup ref for function call
-        self.add_reference(Reference(container=fcall),reftype='fcall',meta=None)
+        if fcall: self.add_reference(Reference(container=fcall),reftype='fcall',meta=None)
         
         # setup refs for outputs
         for i,out in enumerate(outputs):
@@ -1464,7 +1505,7 @@ class Container_Workflow(Container):
     __contained_class__ = Workflow
     
     def pack(self,obj):
-        if VARSPACE['DEBUG']: print('Container_Workflow.pack>>>')
+        if SETTINGS['DEBUG']: print('Container_Workflow.pack>>>')
         refs = obj.references
         dct = {'refs':Referee.refs_to_dict(refs)}
         buffer = dump_to_string(dct)
@@ -1472,11 +1513,13 @@ class Container_Workflow(Container):
         return buffer, hashval
     
     def unpack(self):
-        if VARSPACE['DEBUG']: print('Container_Workflow.unpack>>>')
+        if SETTINGS['DEBUG']: print('Container_Workflow.unpack>>>')
         dct = load_from_string(self.__buffer__)
         w = Workflow()
         w.__references__ = Referee.refs_from_dict(dct['refs'])
         return w
+
+Container.register(Container_Workflow)
 
 class Workflow_BAK(Referee):
     """
@@ -1493,7 +1536,7 @@ class Workflow_BAK(Referee):
         cache - caching flag
         """        
         
-        if VARSPACE['DEBUG']: print('Workflow.__init__>>>')
+        if SETTINGS['DEBUG']: print('Workflow.__init__>>>')
         
         # Convert input arguments to containers
         func = Container.create(func) if func else None
@@ -1564,7 +1607,7 @@ class Container_Workflow_BAK(Container):
     __contained_class__ = Workflow
     
     def pack(self,obj):
-        if VARSPACE['DEBUG']: print('Container_Workflow.pack>>>')
+        if SETTINGS['DEBUG']: print('Container_Workflow.pack>>>')
         refs = obj.references
         dct = {'refs':Referee.refs_to_dict(refs)}
         buffer = dump_to_string(dct)
@@ -1572,7 +1615,7 @@ class Container_Workflow_BAK(Container):
         return buffer, hashval
     
     def unpack(self):
-        if VARSPACE['DEBUG']: print('Container_Workflow.unpack>>>')
+        if SETTINGS['DEBUG']: print('Container_Workflow.unpack>>>')
         dct = load_from_string(self.__buffer__)
         w = Workflow()
         w.__references__ = Referee.refs_from_dict(dct['refs'])
@@ -1675,7 +1718,7 @@ def pack_ndarray(obj):
     np.save(f,obj)
     #binbuf = archlib.compress(f.getvalue())
     binbuf = f.getvalue() # no compression, faster + no space overhead
-    buffer = binascii.hexlify(binbuf).decode(ENCODING) # slow
+    buffer = binascii.hexlify(binbuf).decode(SETTINGS['ENCODING']) # slow
     #buffer = binbuf
     hashval = calc_hash_bin(binbuf)
     return buffer, hashval
@@ -1837,16 +1880,16 @@ class Container_Tree(Container):
 Container.register(Container_Tree)
 
 def track_BAK(*tracking_args,**tracking_kwargs):
-    if VARSPACE['DEBUG']: print('track>>>')
+    if SETTINGS['DEBUG']: print('track>>>')
     nout = tracking_kwargs.get('nout')
     if nout is None:
         nout = tracking_args[0]
     autosave = tracking_kwargs.get('autosave',False)
     cache = tracking_kwargs.get('cache',True)
     def inner(foo):
-        if VARSPACE['DEBUG']: print('inner>>>')
+        if SETTINGS['DEBUG']: print('inner>>>')
         def wrapper(*args,**kwargs):
-            if VARSPACE['DEBUG']: print('wrapper>>>')
+            if SETTINGS['DEBUG']: print('wrapper>>>')
             foo._tracking = {
                 'tracking_args':tracking_args,
                 'tracking_kwargs':tracking_kwargs
@@ -1863,7 +1906,9 @@ def track_BAK(*tracking_args,**tracking_kwargs):
 
 # provenance decorator
 def track(nout,**tracking_options):
+    if SETTINGS['DEBUG']: print('track>>>')
     def inner(foo):
+        if SETTINGS['DEBUG']: print('inner>>>')
         tfun = TrackedFunction(foo,nout=nout,
             tracking_options=tracking_options,
         )
