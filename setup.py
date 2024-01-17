@@ -19,5 +19,6 @@ setup(
         "numpy",
         "tabulate",
         "networkx",
+        "matplotlib",
     ],
 )

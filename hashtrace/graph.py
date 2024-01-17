@@ -1,10 +1,12 @@
 import sys
 import json
 
+import pylab as pl
+
 import numpy as np
 import networkx as nx
 
-import .source as prov
+from . import source as prov
 
 
 # =======================================
@@ -140,7 +142,7 @@ def build_graph(db_backend=prov.db_backend):
             
     return G
 
-def save_graph(G,filename):
+def save_tgf(G,filename):
     
     """ save graph in TGF format """
     
