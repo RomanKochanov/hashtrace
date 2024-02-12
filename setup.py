@@ -20,5 +20,6 @@ setup(
         "tabulate",
         "networkx",
         "matplotlib",
+        "asciidag",
     ],
 )
